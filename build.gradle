@@ -1,0 +1,166 @@
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath "org.akhikhl.gretty:gretty:2.0.0"
+        classpath "gradle.plugin.com.palantir.gradle.docker:gradle-docker:0.13.0"
+    }
+}
+
+plugins {
+    id "io.qameta.allure" version "2.5"
+}
+
+version "${PROJECT_VERSION}"
+
+apply plugin: 'java'
+apply plugin: 'war'
+apply plugin: 'io.qameta.allure'
+apply plugin: 'maven'
+
+def caTasksGroupName = "CA - Development"
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compile group: "org.glassfish.jersey.containers", name: "jersey-container-servlet-core", version: "2.29"
+    compile group: "org.glassfish.jersey.media", name: "jersey-media-json-jackson", version: "2.29"
+    compile group: 'org.glassfish.jersey.inject', name: 'jersey-hk2', version: '2.29'
+}
+
+ext {
+    BUILD_NUM = System.getenv('BUILD_NUMBER') != null ? System.getenv('BUILD_NUMBER') : getCustomBuildId()
+    GIT_VERSION = System.getenv('GIT_REVISION') != null ? System.getenv('GIT_REVISION') : "unknown"
+}
+
+def getCustomBuildId() {
+    String username = System.getProperty("user.name")
+    username = username.replace(' ', '_')
+
+    String time = new Date().format("YYMMdd'T'HHmmss", TimeZone.getTimeZone('GMT+2'))
+
+    return username + "_" + time
+}
+
+task pathingJar(type: Jar) {
+    appendix = "pathing-1.0"
+    doFirst {
+        def classPathFiles = configurations.compile + sourceSets.main.runtimeClasspath + configurations.robotTest + configurations.robotCompile + sourceSets.robot.runtimeClasspath
+        def classPathNormalizedFiles = classPathFiles.files
+                .collect { it.toURI().toString().replaceFirst('/file:/+/', '/') }
+                .join(' ')
+        manifest {
+            attributes "Class-Path": classPathNormalizedFiles
+        }
+    }
+}
+
+task dumpRobotFrameworkClasspath {
+    dependsOn pathingJar
+    doLast {
+        File dumpFile = new File(buildDir, "cdd.robot.classpath.txt")
+        dumpFile.createNewFile()
+        dumpFile.text = pathingJar.archivePath
+    }
+
+}
+
+/* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+/* ~~~~~~~~~~~~~~~ RestAssured ~~~~~~~~~~~~~~~~~*/
+/* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+sourceSets {
+    restAssured {
+        java.srcDirs = ['src/integTest/restAssured/java']
+resources.srcDirs = ['src/integTest/restAssured/resources']
+}
+}
+
+dependencies {
+
+    testCompile group: "io.qameta.allure", name: "allure-junit4", version: "2.0-BETA21"
+    testCompile group: "io.qameta.allure", name: "allure-junit4-aspect", version: "2.0-BETA21"
+
+    compile group: "junit", name: "junit", version: "4.12"
+
+    compile group: "org.slf4j", name: "slf4j-api", version: "1.7.12"
+    compile group: "org.slf4j", name: "jcl-over-slf4j", version: "1.7.12"
+    compile group: "org.slf4j", name: "log4j-over-slf4j", version: "1.7.12"
+    compile group: "ch.qos.logback", name: "logback-classic", version: "1.1.3"
+    compile group: 'io.rest-assured', name: 'rest-assured', version: '3.0.6'
+    compile group: 'io.rest-assured', name: 'json-schema-validator', version: '3.2.0'
+    compile 'io.qameta.allure:allure-rest-assured:2.7.0'
+    compile 'io.qameta.allure:allure-junit4:2.7.0'
+}
+
+task integTest(type: Test) {
+    ignoreFailures = true
+
+    useJUnit {
+        excludeCategories 'rest.assured.shared.config.DevTest'
+    }
+
+    group caTasksGroupName
+    description "Runs the 'REST Assured' integration tests"
+
+    maxHeapSize = '1024m'
+
+    testClassesDirs = sourceSets.restAssured.output.classesDirs
+    classpath = sourceSets.restAssured.runtimeClasspath
+
+    binResultsDir = file("$buildDir/reports/integ-test-results/binary/integTest")
+
+//    reports {
+//        html.enabled = true
+//        html.destination = "$buildDir/reports/integ-test-report"
+//        junitXml.destination = "$buildDir/reports/integ-test-results"
+//    }
+
+    mustRunAfter tasks.test
+
+    outputs.upToDateWhen { false }
+
+    def PROP_PREFIX = "test."
+    System.getProperties().each { key, val ->
+        if (key.startsWith(PROP_PREFIX)) {
+            def newKey = key.substring(PROP_PREFIX.size())
+            println "~~~> Passing a sys parameter to tests execution: $newKey: $val"
+            systemProperty newKey, val
+        }
+    }
+}
+
+
+war {
+    archiveName 'dummy.war'
+}
+
+def projectVersion = "${PROJECT_VERSION}-SNAPSHOT"
+def repositoryUrl = "${artifactory_integration_repository}"
+
+if (!Boolean.valueOf("${artifact_is_snapshot}")) {
+    repositoryUrl = "${artifactory_release_candidate_repository}"
+    projectVersion = "${PROJECT_VERSION}"
+}
+
+uploadArchives {
+    repositories {
+        mavenDeployer {
+            pom*.whenConfigured { pom -> pom.dependencies.clear() }
+            pom.artifactId = "$ARTIFACT_NAME"
+            pom.version = projectVersion
+            pom.groupId = "$artifact_group"
+            repository(url: repositoryUrl) {
+                authentication(userName: "${artifactory_username}", password: "${artifactory_password}")
+            }
+        }
+    }
+}
+
+apply from: 'robot.gradle'
+apply from: 'uploads.gradle'
+
+
+task allDeps(type: DependencyReportTask) {}
